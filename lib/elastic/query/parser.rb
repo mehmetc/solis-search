@@ -141,7 +141,8 @@ module Query
 
             # https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html#_reserved_characters
             #qs['query_string']["query"] += terms.is_a?(Array) ? terms.join(' ') : terms
-            qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\"\~\*\?:\/])/, '\\\\\1')
+            qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
+            #qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\"\~\*\?:\/])/, '\\\\\1')
 
             qs['query_string']["query"] = qs['query_string']["query"].strip
             qs['query_string']["default_operator"] = qs_operator
