@@ -70,6 +70,7 @@ class Index
   def insert(data, id = 'id', save_to_disk = false)
     raise "Index #{@name} does not exist" unless exist?
     raise "Index type is not set. Configuration not loaded" unless @type
+    raise "Data can not be nil" if data.nil?
 
     data = [data] unless data.is_a?(Array)
     if save_to_disk
