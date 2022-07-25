@@ -79,6 +79,47 @@ module Query
 
           query_fragment = query[bool_operator] || []
 
+# usefull for queries where the term is known beforehand
+# for example -> when query is like ?any:*
+#   "any": {
+#     "*": {
+#       "match_all": {}
+#     }
+#   }
+#
+# can also be used like this:
+#   "trefwoord": {
+#     "{{}}": {
+#       "multi_match": {
+#         "query": "{{}}",
+#         "type": "bool_prefix",
+#         "fields": [
+#           "archief.auto.trefwoord",
+#           "archief.auto.trefwoord._2gram",
+#           "archief.auto.trefwoord._3gram"
+#         ]
+#       }
+#     }
+#   }
+#
+# when the first {{}} is encountered the query will be replaced with the right site of the index(trefwoord)
+#  ?trefwoord=water
+#
+#   "{{index}}": {
+#     "{{}}": {
+#       "multi_match": {
+#         "query": "{{}}",
+#         "type": "bool_prefix",
+#         "fields": [
+#           "archief.{{index}}",
+#           "archief.{{index}}._2gram",
+#           "archief.{{index}}._3gram"
+#         ]
+#       }
+#     }
+#   }
+#
+
           if @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?(terms)
               query_fragment << @indexes.query_mapping[index][terms]
           elsif @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?("{{}}")
