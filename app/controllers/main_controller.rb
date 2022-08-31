@@ -23,6 +23,7 @@ class MainController < Sinatra::Base
     content_type :json
     halt 500, ERB::Util.html_escape('I need a "query" parameter') unless params.key?('query')
     query = params['query']
+    query = "*" if query.nil? || query.empty? || query.blank?
     parser = Query::Parser.new(elastic_config[:templates])
     elastic_query = parser.parse_to_elasticsearch(query, params)
     puts "\nORIGINAL_QUERY:\n#{query}"
