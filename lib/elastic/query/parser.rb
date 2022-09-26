@@ -139,15 +139,15 @@ module Query
               to_date = "#{to_date}-12-31"
 
               #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
-              query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
+              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
+              #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
             elsif terms =~ /^(-?\d{8}) TO (-?\d{8})$/
               from_date = $1
               to_date = $2
 
               #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
-              query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
+              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
+              #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
             end
           elsif index =~ /^facet_/
             index = @indexes.facet_map[index]
