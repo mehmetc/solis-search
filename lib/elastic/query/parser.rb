@@ -40,7 +40,7 @@ module Query
       from = params.key?(:from) ? (params[:from].to_i - 1) : 0
       from = 0 if from < 0
       bulk_size = ((params[:bulksize] || params[:bulkSize]) || 10).to_i
-      bulk_size = 100 if bulk_size > 100
+      bulk_size = 100 if bulk_size > 100 && !params.key?(:forceLimit)
       bulk_size = 10000 if params.key?(:forceLimit) && params[:forceLimit].eql?('0')
 
       elastic_query["from"] = from
