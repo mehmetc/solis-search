@@ -9,6 +9,7 @@ module Query
       @templates = templates
       @mappings = templates[:mapping]
       @indexes = Indexes.new(@mappings)
+      @date_range_relation = templates[:date_range_relation] || 'INTERSECTS'
       @parsed = []
     end
 
@@ -142,15 +143,17 @@ module Query
               to_date = "#{to_date}-12-31"
 
               #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
+              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
               #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
+              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation}}}
             elsif terms =~ /^(-?\d{8}) TO (-?\d{8})$/
               from_date = $1
               to_date = $2
 
               #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
+              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
               #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
+              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation}}}
             end
           elsif index =~ /^facet_/
             index = @indexes.facet_map[index]
@@ -315,6 +318,7 @@ module Query
       date_ranges = parsed.select { |s| s[:type].eql?('index') && s[:value] =~ /(start|end)?date/ }
       if date_ranges.length > 0
         index = parsed.rindex(date_ranges[0])
+        date_index = parsed[index].clone
         date_range_operator = { value: 'AND', type: 'operator', delete: false, offset: [0, 0] }
         date_ranges.each do |date_range|
           start_index = parsed.rindex(date_range)
@@ -337,9 +341,9 @@ module Query
         end
 
         parsed[index] = date_range_operator
-        #parsed[index + 1] = { value: ' ', type: 'term', delete: false, offset: [0, 0] }
-        #parsed[index + 2] = { value: 'date_range', type: 'index', delete: false, offset: [0, 0] }
-        parsed[index + 1] = { value: new_date_range.join(''), type: 'date_range', delete: false, offset: [0, 0] }
+        parsed[index + 1] = { value: ' ', type: 'term', delete: false, offset: [0, 0] }
+        parsed[index + 2] = { value: date_index[:value], type: 'index', delete: false, offset: [0, 0] }
+        parsed[index + 3] = { value: new_date_range.join(''), type: 'date_range', delete: false, offset: [0, 0] }
       end
 
       parsed.delete_if { |d| d[:delete] }
