@@ -171,28 +171,30 @@ module Query
             end
 
             qs = JSON.load(File.read(@mappings[:query_string]))
+            qs_key = qs.keys.first
             qs_index = 0
             qs_operator = operator.eql?('NOT') ? 'AND' : operator
             unless query_fragment.empty?
               if prev_index == index && qs_operator == prev_operator
-                qs = query_fragment.select { |s| s.key?('query_string') }
+                qs = query_fragment.select { |s| s.key?(qs_key) }
                 qs = qs.empty? ? JSON.load(File.read(@mappings[:query_string])) : qs.first
                 qs_index = query_fragment.rindex(qs)
+                qs_key = qs.keys.first
               else
                 qs_index = query_fragment.size
               end
             end
-            qs['query_string']["fields"] << real_index
-            qs['query_string']["fields"]&.flatten!&.uniq!
-            qs['query_string']["query"] += ' ' if qs['query_string']["query"].length > 0
+            qs[qs_key]["fields"] << real_index
+            qs[qs_key]["fields"]&.flatten!&.uniq!
+            qs[qs_key]["query"] += ' ' if qs[qs_key]["query"].length > 0
 
             # https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html#_reserved_characters
             #qs['query_string']["query"] += terms.is_a?(Array) ? terms.join(' ') : terms
-            qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
             #qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\"\~\*\?:\/])/, '\\\\\1')
-
-            qs['query_string']["query"] = qs['query_string']["query"].strip
-            qs['query_string']["default_operator"] = qs_operator
+            #qs[qs_key]["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
+            qs[qs_key]["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
+            qs[qs_key]["query"] = qs[qs_key]["query"].strip
+            qs[qs_key]["default_operator"] = qs_operator
             query_fragment[qs_index] = qs
           end
           prev_index = index
@@ -439,7 +441,8 @@ module Query
       until (open_round_brackets = data.select { |s| s[:type].eql?('open_round_bracket') }).empty?
         start_index = data.index(open_round_brackets.first)
         matching_bracket = find_closing_round_bracket(start_index, data)
-        if matching_bracket.eql?(data.length - 1)
+
+        if matching_bracket.eql?(data.length - 1) && data[start_index-1][:type].eql?('index')
           data.delete_at(matching_bracket)
           data.delete_at(start_index)
         else
@@ -499,7 +502,7 @@ module Query
           terms = clause[om[1]..om[2]]
           next if terms.empty? || terms.map { |m| m[:value] }.join('').strip.empty?
 
-          sub_queries << { index: index[0], operator: op, terms: terms }
+          sub_queries << { index: index[0], operator: om.first, terms: terms }
         end
         unless sub_queries.empty?
           clause = sub_queries
@@ -545,7 +548,8 @@ module Query
           query += value[:value]
         end
       end
-      query.strip.gsub(/^\(*/, '').gsub(/\)*$/, '')
+      #      query.strip.gsub(/^\(*/, '').gsub(/\)*$/, '')
+      query.strip
     end
 
     def make_operatormap(data)
