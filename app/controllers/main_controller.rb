@@ -42,7 +42,7 @@ class MainController < Sinatra::Base
   end
 
   get '/help' do
-    words = ['water', 'wijn', 'archief', 'koning', 'antw', 'amsab', 'kadoc', 'gebouw', 'open']
+    words = ['water', 'wijn', 'boek', 'koning', 'antw', 'dirk', 'gebouw', 'open']
 
     erb :'help.html', locals: {base_path: ConfigFile[:services][$SERVICE_ROLE][:base_path], indexes: available_indexes, words: words}
   end

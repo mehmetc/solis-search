@@ -106,7 +106,7 @@ class Index
   private
 
   def load_configuration_file(configuration_file_name)
-    raise 'Configuration file not found' unless File.exist?(configuration_file_name)
+    raise "Configuration file '#{configuration_file_name}' not found" unless File.exist?(configuration_file_name)
     JSON.parse(File.read(configuration_file_name))
   end
 end
