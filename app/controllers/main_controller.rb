@@ -24,9 +24,11 @@ class MainController < Sinatra::Base
     halt 500, ERB::Util.html_escape('I need a "query" parameter') unless params.key?('query')
     query = params['query']
     query = "*" if query.nil? || query.empty? || query.blank?
+
     parser = Query::Parser.new(elastic_config[:templates])
-    elastic_query = parser.parse_to_elasticsearch(query, params)
+    elastic_query = parser.parse(query).to_elastic(params)
     puts "\nORIGINAL_QUERY:\n#{query}"
+    puts "PARSED QUERY:\n#{parser.parsed.to_json}"
     puts "ELASTIC_QUERY: \n#{elastic_query.to_json}"
 
     response = HTTP.post("#{elastic_config[:host]}/#{elastic_config[:index]}/_search", json: elastic_query)

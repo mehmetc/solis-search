@@ -1,9 +1,19 @@
+$LOAD_PATH << '.'
 require 'json'
 require_relative 'indexes'
+##
+# Parser philosophy
+# t=term
+# o=operator
+# i=index
+#
+# T=t(o?t?)+
+# Q=(oiT)+
+#
 
 module Query
   class Parser
-    attr_reader :query, :parsed
+    attr_reader :parsed
 
     def initialize(templates)
       @templates = templates
@@ -11,604 +21,661 @@ module Query
       @indexes = Indexes.new(@mappings)
       @date_range_relation = templates[:date_range_relation] || 'INTERSECTS'
       @parsed = []
+
     end
 
     def parse(query)
-      @query = query
-      @parsed = determine_clause(
-        determine_phrases(
-          normalize_dates(
-            normalize_operators(
-              normalize_query(
-                normalize_wildcard(
-                  normalize_missing_index(
-                    determine_indexes(
-                      tokenize(query)
-                    )
-                  )
-                )
-              )
-            )
-          )
-        )
-      )
+      @parsed = []
+      # self.tokenize(query).normalize_rounded_brackets.normalize_terms.determine_phrases.determine_indexes.normalize_indexes.normalize_operators
+      self.tokenize(query).determine_indexes.fix_tokenization.determine_phrases.remove_single_space.normalize_rounded_brackets.normalize_indexes.
+        normalize_operators.normalize_rounded_brackets.normalize_terms
+      self
     end
 
-    def parse_to_elasticsearch(raw_query_string, params)
+    def to_elastic(params = {})
+      params = params.with_indifferent_access
+      @parsed = reset_offset(@parsed)
+      from_base = params[:from_base].to_i || 0
       sort_map = JSON.load(File.read(@mappings[:sort]))
-      elastic_query = JSON.load(File.read(@templates[:query])) || {}
+      elastic_query = JSON.load(File.read(@templates[:query])).with_indifferent_access || {}
 
-      from = params.key?(:from) ? (params[:from].to_i - 1) : 0
-      from = 0 if from < 0
-      bulk_size = ((params[:bulksize] || params[:bulkSize]) || 10).to_i
-      bulk_size = 100 if bulk_size > 100 && !params.key?(:forceLimit)
-      bulk_size = 10000 if params.key?(:forceLimit) && params[:forceLimit].eql?('0')
-
-      elastic_query["from"] = from
-      elastic_query["size"] = bulk_size
-      if elastic_query.key?('query')
-        unless elastic_query['query'].key?('bool')
-          elastic_query['query']['bool'] = {}
-        end
-
-        unless elastic_query['query']['bool'].key?('must')
-          elastic_query['query']['bool']['must'] = []
-        end
-      else
-        elastic_query['query'] = { 'bool' => { 'must' => [] } }
-      end
-
+      elastic_query["from"] = params.key?(:from) ? ((params[:from].to_i - 1) < 0 ? (params[:from].to_i) : params[:from].to_i - 1) : from_base
+      elastic_query["size"] = params[:bulksize] || params[:bulkSize] || 10
       elastic_query['sort'] = sort_map[params['sort']] if params.key?('sort') && !sort_map[params['sort']].nil?
+      elastic_query["query"] = { "bool": {} } unless elastic_query.key?("query") && elastic_query["query"].key?("bool")
 
-      parsed = parse(raw_query_string)
-      query = {}
-      prev_index = nil
-      prev_operator = 'AND'
-      parsed.each do |clauses|
-        clauses[:clause].each do |clause|
-          index = clause[:index]
-          operator = clause[:operator]
-          terms = clause[:terms]
+      # find all indexes
+      qbl = query_bit_list().join()
+      query_offset = []
+      qbl.scan(/oi/) { |s| query_offset << $~.offset(0)[0] }
 
-          bool_operator = 'must'
+      query_offset.each_with_index do |offset, i|
+        operator = @parsed[offset][:value]
+        index = @parsed[offset + 1][:value]
 
-          if operator.eql?('OR')
-            bool_operator = 'should'
-          elsif operator =~ /NOT$/
-            bool_operator = 'must_not'
+        offset_until = @parsed.size
+        offset_until = query_offset[i + 1] if i + 1 < query_offset.size
+
+        query = @parsed[offset...offset_until]
+        terms = reset_offset(query[2..].clone)
+        from_index = 0
+        internal_operators = terms.select { |s| s[:type].eql?('operator') }
+        new_terms = {}
+        if internal_operators.empty?
+          new_terms[operator] = terms.map { |m| m[:value] }
+        elsif !internal_operators.empty? && internal_operators.first[:value].eql?('NOT')
+          internal_operators = [query.select { |s| s[:type].eql?('operator')}.select{|s| s[:value].eql?(operator)}.first] + internal_operators
+        end
+
+        internal_operators.each_with_index do |internal_operator, i|
+          internal_operator_index = terms.rindex(internal_operator) || 0
+
+          next_index = terms.rindex(internal_operators[i + 1]) || terms.length
+          left = terms[from_index...internal_operator_index].map { |m| m[:value] }
+          right = terms[internal_operator_index + 1...next_index].map { |m| m[:value] }
+
+          if from_index==0 && internal_operator_index==0 && left.empty?
+            left << terms[from_index][:value]
           end
 
-          query_fragment = query[bool_operator] || []
+          new_terms[internal_operator[:value]] = [] unless new_terms.key?(internal_operator[:value])
+          new_terms[internal_operator[:value]] += (left + right)
+          new_terms[internal_operator[:value]].uniq!
 
-# usefull for queries where the term is known beforehand
-# for example -> when query is like ?any:*
-#   "any": {
-#     "*": {
-#       "match_all": {}
-#     }
-#   }
-#
-# can also be used like this:
-#   "trefwoord": {
-#     "{{}}": {
-#       "multi_match": {
-#         "query": "{{}}",
-#         "type": "bool_prefix",
-#         "fields": [
-#           "archief.auto.trefwoord",
-#           "archief.auto.trefwoord._2gram",
-#           "archief.auto.trefwoord._3gram"
-#         ]
-#       }
-#     }
-#   }
-#
-# when the first {{}} is encountered the query will be replaced with the right site of the index(trefwoord)
-#  ?trefwoord=water
-#
-#   "{{index}}": {
-#     "{{}}": {
-#       "multi_match": {
-#         "query": "{{}}",
-#         "type": "bool_prefix",
-#         "fields": [
-#           "archief.{{index}}",
-#           "archief.{{index}}._2gram",
-#           "archief.{{index}}._3gram"
-#         ]
-#       }
-#     }
-#   }
-#
+          from_index = internal_operator_index + 1
+        end
+        fragments = []
+        new_terms.each do |sub_operator, terms|
+          fragments << build_query_fragment(index, sub_operator, operator, terms)
+        end
 
-          if @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?(terms)
-              query_fragment << @indexes.query_mapping[index][terms]
-          elsif @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?("{{}}")
-            q = @indexes.query_mapping[index]["{{}}"]
+        eq = elastic_query["query"]["bool"]
+        # is it a filter?
+        if facet?(index)
+          elastic_query["query"]["bool"] = elastic_query["query"]["bool"].merge({ "filter": { "bool": {} } }) unless elastic_query["query"]["bool"].key?("filter")
 
-            query_fragment << JSON.parse(q.to_json.gsub('{{}}', terms))
-          elsif index =~ /date/
-            index = @indexes.facet_map[index]
-            #            if terms =~ /^(-?\d{3,4}|NaN) TO (-?\d{3,4}|NaN)$/
-            if terms =~ /^(-?\d{1,4}|NaN|)? ?TO ?(-?\d{1,4}|NaN|)?$/
-              from_date = $1
-              to_date = $2
+          fragments.each do |fragment|
+            key = fragment.keys.first
+            eq = elastic_query["query"]["bool"]["filter"]["bool"]
+            unless key.eql?(elastic_operator(operator))
+              unless elastic_query["query"]["bool"]["filter"]["bool"][elastic_operator(operator)]
+                elastic_query["query"]["bool"]["filter"]["bool"] = elastic_query["query"]["bool"]["filter"]["bool"].merge({ "#{elastic_operator(operator)}" => { "bool": {} } })
 
-              from_date = '1' unless from_date =~ /^\d+$/ && from_date.length <= 4
-              from_date = "%04d" % from_date if from_date.length < 4
-              from_date = "#{from_date}-01-01"
-
-              to_date = '9998' unless to_date =~ /^\d+$/ && to_date.length <= 4
-              to_date = "%04d" % to_date if to_date.length < 4
-              to_date = "#{to_date}-12-31"
-
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
-              #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
-              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation}}}
-            elsif terms =~ /^(-?\d{8}) TO (-?\d{8})$/
-              from_date = $1
-              to_date = $2
-
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'CONTAINS'}}}
-              #query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => 'WITHIN'}}}
-              #query_fragment << { 'range' => { index => { 'gte' => from_date, 'lte' => to_date, 'relation' => 'INTERSECTS' } } }
-              query_fragment << {'range' => {index => {'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation}}}
-            end
-          elsif index =~ /^facet_/
-            index = @indexes.facet_map[index]
-
-            query_fragment << { "term" => { "#{index}" => terms.gsub(/^"/, '').gsub(/"$/, '') } }
-          else
-            real_index = @indexes.index_map[index]
-
-            if index.eql?('rid')
-              if terms.is_a?(Array)
-                terms = terms.map { |m| m.gsub(/^"TN_/, '"') }
-              else
-                terms = terms.gsub(/^"TN_/, '"')
+                if elastic_query["query"]["bool"]["filter"]["bool"][elastic_operator(operator)].is_a?(Array)
+                  elastic_query["query"]["bool"]["filter"]["bool"][elastic_operator(operator)] += { "bool" => {} }
+                end
+                eq = elastic_query["query"]["bool"]["filter"]["bool"][elastic_operator(operator)]["bool"]
               end
             end
 
-            qs = JSON.load(File.read(@mappings[:query_string]))
-            qs_key = qs.keys.first
-            qs_index = 0
-            qs_operator = operator.eql?('NOT') ? 'AND' : operator
-            unless query_fragment.empty?
-              if prev_index == index && qs_operator == prev_operator
-                qs = query_fragment.select { |s| s.key?(qs_key) }
-                qs = qs.empty? ? JSON.load(File.read(@mappings[:query_string])) : qs.first
-                qs_index = query_fragment.rindex(qs)
-                qs_key = qs.keys.first
+
+            if eq[key].nil? && !elastic_operator(operator).eql?(key)
+              queries = eq[elastic_operator(operator)].clone || []
+              queries = [queries] unless queries.is_a?(Array)
+
+              if fragment.is_a?(Hash)
+                queries << {"bool": fragment}
               else
-                qs_index = query_fragment.size
+              # if key.eql?(fragment.keys.first)
+              #   queries << fragment[key]
+              # else
+                queries << fragment
+              # end
               end
+            else
+              queries = eq[key].clone || []
+              if queries.is_a?(Hash) && queries.keys.include?('bool')
+                queries = queries['bool'][key] || []
+              end
+
+
+              queries << fragment[key]
             end
-            qs[qs_key]["fields"] << real_index
-            qs[qs_key]["fields"]&.flatten!&.uniq!
-            qs[qs_key]["query"] += ' ' if qs[qs_key]["query"].length > 0
 
-            # https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html#_reserved_characters
-            #qs['query_string']["query"] += terms.is_a?(Array) ? terms.join(' ') : terms
-            #qs['query_string']["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\"\~\*\?:\/])/, '\\\\\1')
-            #qs[qs_key]["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
-            qs[qs_key]["query"] += (terms.is_a?(Array) ? terms.join(' ') : terms).gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~\*\?:\/])/, '\\\\\1')
-            qs[qs_key]["query"] = qs[qs_key]["query"].strip
-            qs[qs_key]["default_operator"] = qs_operator
-            query_fragment[qs_index] = qs
+            if elastic_query["query"]["bool"]["filter"]["bool"].keys.first.eql?(elastic_operator(operator))
+              elastic_query["query"]["bool"]["filter"]["bool"][elastic_operator(operator)]=queries.flatten
+            else
+              eq[elastic_operator(operator)] = queries.flatten
+            end
           end
-          prev_index = index
-          prev_operator = qs_operator
-          query[bool_operator] = query_fragment.flatten
+
+        else
+          fragments.each do |fragment|
+            key = fragment.keys.first
+            queries = eq[key] || []
+            queries << fragment[key]
+
+            eq[key] = queries.flatten
+          end
         end
 
-      end
-
-      query.each do |op, data|
-        case op
-        when 'must'
-          elastic_query['query']['bool']['must'] += data
-        when 'should'
-          elastic_query['query']['bool']['must'] << { "bool" => { "should" => data } }
-        when 'must_not'
-          elastic_query['query']['bool']['must'] << { "bool" => { "must_not" => data } }
-        end
       end
 
       elastic_query
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      log_error(e.backtrace.join("\n"), __method__.to_s, __LINE__)
+      self
     end
 
-    private
+    def build_query_fragment(index, operator, index_operator, terms)
+      sub_operator = operator
+      query_terms = terms
+      fragment = ''
+      strategy_type = 'default'
+      #  eq['bool'][elastic_operator(operator)] = [] unless eq['bool'].key?(elastic_operator(operator))
+
+      # this is a special case. When the index is a query_mapped index and the query is a child of the query_map
+      # ex. when the index is facet_newrecords and it's key is "07 days back"
+      if @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?(query_terms.flatten.first) # @indexes.query_mapping[index].has_key?(query)
+        strategy_type = 'query_mapping_1'
+        fragment = @indexes.query_mapping[index][query_terms.flatten.first]
+        # same as previous but a key of the query_mapping = {{}} then this will be replaced with the query_terms
+      elsif @indexes.query_mapping.has_key?(index) && @indexes.query_mapping[index].has_key?("{{}}")
+        strategy_type = 'query_mapping_2'
+        q = @indexes.query_mapping[index]["{{}}"]
+
+        fragment = JSON.parse(q.to_json.gsub('{{}}', query))
+        # when index if a FACET we add a term index
+      elsif facet?(index)
+        strategy_type = 'facet'
+        elastic_index = @indexes.facet_map[index]
+        elastic_index = [elastic_index] unless elastic_index.is_a?(Array)
+        fragment = []
+        elastic_index.each do |ri|
+          query_terms.each do |term|
+            if ri =~ /date|duration/
+              fragment << process_date(ri, term)
+            else
+
+              qs = JSON.load(File.read(@mappings[:term_query]))
+              qs['term'][ri] = qs['term'].delete 'index'
+              qs['term'][ri]['value'] = term.gsub(/^"/, '').gsub(/"$/, '').gsub('_PC_TN', '') #&.gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~:\/])/, '\\\\\1') || ''
+
+              fragment << qs
+            end
+          end
+        end
+        operator = sub_operator unless operator.eql?('NOT')
+        # when the index contains a date keyword make it a date search
+      elsif index =~ /date|duration/
+        strategy_type = 'date'
+        elastic_index = @indexes.facet_map[index]
+        process_date(elastic_index, query_terms.join(' '))
+      elsif index.eql?('rid')
+        strategy_type = 'rid'
+        elastic_index = @indexes.index_map[index]
+        if query_terms.is_a?(Array)
+          query_terms = query_terms.map { |m| m.gsub(/^"TN_/, '"') }
+        else
+          query_terms = query_terms.gsub(/^"TN_/, '"')
+        end
+
+        elastic_index = [elastic_index] unless elastic_index.is_a?(Array)
+        elastic_index.each do |ri|
+          qs = JSON.load(File.read(@mappings[:term_query]))
+
+          qs['term'][ri] = qs['term'].delete 'index'
+          qs['term'][ri]['value'] = query_terms.join(' ').gsub(/^"/, '').gsub(/"$/, '')
+          fragment = qs
+        end
+
+      else
+        strategy_type = 'default'
+        # in all other cases we use a query_string
+        elastic_index = @indexes.index_map[index]
+        elastic_index = @indexes.index_map['any'] if elastic_index.nil?
+
+        query_operator = operator.eql?('NOT') ? 'AND' : operator
+
+        query_string = JSON.load(File.read(@mappings[:query_string]))
+        query_string['query_string']['default_operator'] = query_operator
+        query_string['query_string']['fields'] = elastic_index
+        query_string['query_string']['query'] = query_terms.join(' ')&.gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~:\/])/, '\\\\\1')&.gsub(/(\?)$/, '\\\\\1') || ''
+
+        fragment = query_string
+      end
+
+      qf = {}
+      if strategy_type.eql?('default') && !operator.eql?('NOT')
+        qf[elastic_operator(index_operator)] = fragment
+      else
+        qf[elastic_operator(operator)] = fragment
+      end
+      qf
+    end
 
     def tokenize(query)
-      parsed = []
+      query.gsub!('\\', '')
+      # query.scan(/\w+|\W(?<! )/) do |token|
       query.scan(/\w+|\W/) do |token|
         token_offset = $~.offset(0)
         case token
         when ":"
-          parsed << { value: token, delete: false, type: 'colon', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'colon', offset: token_offset }
         when '"'
-          parsed << { value: token, delete: false, type: 'quote', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'quote', offset: token_offset }
         when '('
-          parsed << { value: token, delete: false, type: 'open_round_bracket', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'open_round_bracket', offset: token_offset }
         when ')'
-          parsed << { value: token, delete: false, type: 'close_round_bracket', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'close_round_bracket', offset: token_offset }
         when '['
-          parsed << { value: token, delete: false, type: 'open_box_bracket', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'open_box_bracket', offset: token_offset }
         when ']'
-          parsed << { value: token, delete: false, type: 'close_box_bracket', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'close_box_bracket', offset: token_offset }
         when /OR|AND|NOT/
-          parsed << { value: token, delete: false, type: 'operator', offset: token_offset }
+          @parsed << { value: token, delete: false, type: 'operator', offset: token_offset }
         else
-          parsed << { value: token, delete: false, type: 'term', offset: token_offset } #unless token.eql?(' ')
+          @parsed << { value: token, delete: false, type: 'term', offset: token_offset } # unless token.eql?(' ')
         end
       end
-      parsed
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
     end
 
-    def normalize_query(parsed)
-      parsed.each_with_index do |p, i|
-        if p[:value].eql?(' ') || p[:value].empty?
-          if (parsed[i + 1] && !parsed[i + 1][:type].eql?('term')) && (parsed[i - 1] && !parsed[i - 1][:type].eql?('term'))
-            p[:delete] = true
-          end
-        end
+    def get_not_deleted_term_index(term_index, term_step)
+      look_index = term_index + (term_step)
+      return term_index if look_index < 0 && (look_index < @parsed.length || !@parsed[look_index][:type].eql?('term'))
+      return term_index if look_index >= @parsed.length || !@parsed[look_index][:type].eql?('term')
 
+      term = @parsed[look_index]
+      if term[:delete] || !term[:type].eql?('term')
+        look_index = get_not_deleted_term_index(look_index, term_step)
       end
 
-      parsed.delete_if { |d| d[:delete] }
-
-      parsed
+      look_index
     end
 
-    def normalize_missing_index(parsed)
-      i = 0
-      while parsed[i][:type].eql?('open_round_bracket')
-        i += 1
-      end
+    def fix_tokenization
+      terms = @parsed.select { |s| s[:type].eql?('term') }
+      terms.each do |term|
+        term[:value] = term[:value].gsub('\\', '') # cleanup
+        term_index = @parsed.rindex(term)
 
-      unless parsed[i][:type].eql?('index')
-        parsed.insert(i, { value: "any", delete: false, type: "index", offset: [] })
-      end
+        if term_index > 0 && !term[:delete]
+          prev_term_index = get_not_deleted_term_index(term_index, -1)
+          next_term_index = get_not_deleted_term_index(term_index, 1)
+          prev_term = @parsed[prev_term_index]
+          next_term = @parsed[next_term_index]
+          #
+          next if !prev_term[:type].eql?('term')
+          if ['*', '?', '-', ',', '!', '@', '#', '$', ';', ':', '/', '%', '^', '&', '"', '|', '+', '\'', "~", '`', '<', '>', '(', ')'].include?(term[:value])
+            # if !['(',')'].include?(term[:value])
+            prev_term[:value] += term[:value]
+            term[:delete] = true
 
-      parsed.select { |s| s[:type].eql?('operator') }.each do |operator|
-        index = parsed.rindex(operator)
-        parsed[index..].each_with_index do |p, i|
-          break if p[:type].eql?('index')
-          if p[:type].eql?('open_round_bracket')
-            parsed.insert(index + i, { value: "any", delete: false, type: "index", offset: [] })
-          end
-        end
-      end
-
-      parsed
-    end
-
-    def normalize_wildcard(parsed)
-      parsed.each do |p|
-        if p[:value].eql?('*')
-          index = parsed.rindex(p)
-          if index - 1 > 0 && parsed[index - 1][:type].eql?('term')
-            parsed[index - 1][:value] = "#{parsed[index - 1][:value]}*"
-            parsed[index][:delete] = true
-          end
-        end
-      end
-      parsed
-    end
-
-    def normalize_operators(parsed)
-      parsed.each do |p|
-        if p[:type].eql?('operator')
-          index = parsed.rindex(p)
-          if p[:value].eql?('AND')
-            if index + 1 <= parsed.length - 1
-              if parsed[index + 1][:type].eql?('operator') && parsed[index + 1][:value].eql?('NOT')
-                parsed[index][:delete] = true
-              end
+            if !next_term[:value].blank? && next_term[:type].eql?('term') && next_term_index != term_index
+              prev_term[:value] += next_term[:value]
+              next_term[:delete] = true
             end
           end
         end
       end
-
-      parsed.delete_if { |d| d[:delete] }
-      parsed
+      @parsed.delete_if { |d| d[:delete] }
+      @parsed = reset_offset(@parsed)
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
     end
 
-    def normalize_dates(parsed)
-      new_date_range = []
-      date_ranges = parsed.select { |s| s[:type].eql?('index') && s[:value] =~ /(start|end)?date/ }
-      if date_ranges.length > 0
-        index = parsed.rindex(date_ranges[0])
-        date_index = parsed[index].clone
-        date_range_operator = { value: 'AND', type: 'operator', delete: false, offset: [0, 0] }
-        date_ranges.each do |date_range|
-          start_index = parsed.rindex(date_range)
-          end_index = find_closing_box_bracket(start_index, parsed)
-          terms = parsed[start_index..end_index].select { |s| s[:type].eql?('term') }
-          # if date_range[:value].eql?('enddate')
-          #   new_date_range << terms.first[:value]
-          # else
-          #   new_date_range << terms.last[:value]
-          # end
-
-          new_date_range << "#{terms.map{|m| m[:value]}.join('')}"
-
-          until parsed[start_index][:type].eql?('operator') || start_index < 1
-            start_index -= 1
-          end
-          date_range_operator = parsed[start_index].clone
-
-          parsed[start_index..end_index].each { |d| d[:delete] = true }
-        end
-
-        parsed[index] = date_range_operator
-        parsed[index + 1] = { value: ' ', type: 'term', delete: false, offset: [0, 0] }
-        parsed[index + 2] = { value: date_index[:value], type: 'index', delete: false, offset: [0, 0] }
-        parsed[index + 3] = { value: new_date_range.join(''), type: 'date_range', delete: false, offset: [0, 0] }
-      end
-
-      parsed.delete_if { |d| d[:delete] }
-
-      # indexes = parsed.select { |s| s[:type].eql?('index') && s[:value] =~ /date/ }
-      # indexes.each do |index|
-      #   date_ranges = parsed[parsed.index(index)..].select { |s| s[:type].eql?('open_box_bracket') }
-      #   date_ranges.each do |date_range|
-      #     start_index = parsed.index(date_range)
-      #     end_index = find_closing_box_bracket(start_index, parsed)
-      #     terms = parsed[start_index..end_index].select { |s| s[:type].eql?('term') }.map { |m| m[:value] }.join('').split(' TO ')
-      #
-      #     parsed[start_index..end_index].each { |d| d[:delete] = true }
-      #     parsed[start_index] = { value: terms.join(' TO '), type: 'date_range', delete: false, offset: [0, 0] }
-      #     parsed.delete_if { |d| d[:delete] }
-      #   end
-      # end
-
-      parsed
-    end
-
-    def determine_indexes(parsed)
-      colon = parsed.select { |s| s[:type].eql?('colon') }
+    def determine_indexes
+      colon = @parsed.select { |s| s[:type].eql?('colon') }
       colon.each do |c|
-        index = parsed.rindex(c)
-        if index > 0
-          term_index = index - 1
-          term = parsed[term_index]
+        colon_index = @parsed.rindex(c)
+        if colon_index > 0
+          term_index = colon_index - 1
+          term = @parsed[term_index]
           if @indexes.include?(term[:value])
             c[:delete] = true
-            parsed[term_index][:type] = 'index'
-          end
-        end
-      end
-      parsed.delete_if { |d| d[:delete] }
-      parsed
-    end
-
-    def determine_phrases(parsed)
-      while (quotes = parsed.select { |s| s[:type].eql?('quote') }).length > 0
-        phrase = []
-        quote_index = parsed.rindex(quotes[0])
-
-        parsed[quote_index..parsed.length].each_with_index do |t, i|
-          if t[:type].eql?('quote') && i > 0
-            t[:delete] = true
-            break
+            @parsed[term_index][:type] = 'index'
           else
-            phrase << t.clone if i > 0
-            t[:delete] = true
+            c[:type] = 'term'
+          end
+        end
+      end
+      @parsed.delete_if { |d| d[:delete] }
+
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    ##
+    # add indexes to the beginning of each term sequence
+    # ex. t t o t o i t t t
+    # normalized form
+    # i t t o t o i t t t
+    #
+    # Operator precedence
+    # NOT(must_not), AND(must), OR(should)
+    #
+    # TODO: Grouping ()
+    #
+    def normalize_indexes
+      default_index = { value: "any", delete: false, type: "index", offset: [] }
+      default_operator = { value: "AND", delete: false, type: "operator", offset: [] }
+
+      qbl = query_bit_list()
+
+      case qbl[0]
+      when 't'
+        @parsed.insert(0, default_index.clone)
+        @parsed.insert(0, default_operator.clone)
+      when 'i'
+        @parsed.insert(0, default_operator.clone)
+      end
+
+      @parsed = reset_offset(@parsed)
+      qbl = query_bit_list()
+
+      # check if every index has an operator
+      @parsed.select { |s| s[:type].eql?('index') }.each do |index|
+        i = @parsed.rindex(index)
+        unless qbl[i - 1].eql?('o')
+          @parsed.insert(i, default_operator.clone)
+        end
+      end
+
+      @parsed = reset_offset(@parsed)
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    def normalize_terms
+      changes = 1
+      while changes != 0
+        changes = 0
+        terms = @parsed.select { |s| s[:type].eql?('term') || s[:type] =~ /bracket/ }
+        prev_term = nil
+        terms.reverse.each_with_index do |term, _|
+          unless prev_term.nil?
+            if prev_term[:offset][0] == term[:offset][1] && !term[:type].eql?('close_round_bracket')
+              #              term[:value] += ' ' unless ['.','(',')','[',']','&'].include?(term[:value]) || ['.','(',')','[',']','&'].include?(prev_term[:value][0])
+              term[:value] += prev_term[:value]
+              term[:type] = 'term'
+              prev_term[:delete] = true
+              changes += 1
+            end
           end
 
+          prev_term = term
         end
 
-        parsed[quote_index] = { value: phrase, delete: false, type: 'phrase', offset: [phrase.first[:offset][0], phrase.last[:offset][1]] }
-        parsed.delete_if { |d| d[:delete] }
-      end
-
-      parsed
-    end
-
-    def find_closing_box_bracket(candidate_index_start, parsed)
-      candidate_index_end = -1
-      bracket_counter = 0
-      parsed[candidate_index_start..parsed.length].each_with_index do |part, index|
-        bracket_counter += 1 if part[:type].eql?('open_box_bracket')
-        bracket_counter -= 1 if part[:type].eql?('close_box_bracket')
-
-        if part[:type].eql?('close_box_bracket') && bracket_counter == 0
-          candidate_index_end = candidate_index_start + index
-          break
+        @parsed.delete_if { |d| d[:delete] }
+        @parsed = reset_offset(@parsed)
+        # remove_single_space
+        terms.each do |term|
+          term[:value].strip!
+          if term[:value] =~ /^\(/ && term[:value] =~ /\)$/
+            term[:value] = term[:value].gsub(/^\(/, '').gsub(/\)$/, '')
+          end
         end
       end
-      candidate_index_end
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
     end
 
-    def find_closing_round_bracket(candidate_index_start, parsed)
-      candidate_index_end = -1
-      bracket_counter = 0
-      parsed[candidate_index_start..parsed.length].each_with_index do |part, index|
-        bracket_counter += 1 if part[:type].eql?('open_round_bracket')
-        bracket_counter -= 1 if part[:type].eql?('close_round_bracket')
-
-        if part[:type].eql?('close_round_bracket') && bracket_counter == 0
-          candidate_index_end = candidate_index_start + index
-          break
-        end
+    def remove_single_space
+      @parsed.each_with_index do |p, i|
+        prev_p = i > 0 ? @parsed[i - 1] : p
+        next_p = i < p.length ? @parsed[i + 1] : p
+        p[:delete] = true if (p[:value].eql?(' ') || p[:value].empty?) && (prev_p[:type].eql?('operator') || next_p[:type].eql?('operator'))
       end
-      candidate_index_end
+      @parsed.delete_if { |d| d[:delete] }
+      @parsed = reset_offset(@parsed)
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
     end
 
-    def remove_matching_rounded_brackets(data)
-      until (open_round_brackets = data.select { |s| s[:type].eql?('open_round_bracket') }).empty?
-        start_index = data.index(open_round_brackets.first)
-        matching_bracket = find_closing_round_bracket(start_index, data)
+    def normalize_rounded_brackets
+      until (open_round_brackets = @parsed.select { |s| s[:type].eql?('open_round_bracket') }).empty?
+        start_index = @parsed.index(open_round_brackets.first)
+        matching_bracket = find_closing_round_bracket(start_index)
 
-        if matching_bracket.eql?(data.length - 1) && data[start_index-1][:type].eql?('index')
-          data.delete_at(matching_bracket)
-          data.delete_at(start_index)
+        next_start_index = open_round_brackets.length > 1 ? @parsed.index(open_round_brackets[1]) : 0
+
+        if matching_bracket.eql?(@parsed.length - 1) && (@parsed[start_index - 1][:type].eql?('index') || start_index == 0)
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
+        elsif start_index == 0 && matching_bracket > 0
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
+        elsif (next_start_index - start_index) == 1 &&
+          open_round_brackets[0][:type] == open_round_brackets[1][:type] &&
+          open_round_brackets[0][:offset][1] == open_round_brackets[1][:offset][0] # double brackets
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
+        elsif @parsed[start_index - 1][:type].eql?('index') && !@parsed[matching_bracket + 1].eql?('term')
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
+        elsif @parsed[start_index - 1][:type].eql?('operator') && !@parsed[matching_bracket + 1].eql?('term')
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
+        elsif matching_bracket.eql?(@parsed.length - 1) && !facet?(find_index_in_query_from(start_index)[:value])
+          @parsed.delete_at(matching_bracket)
+          @parsed.delete_at(start_index)
         else
           break
         end
       end
 
-      data
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
     end
 
-    def determine_clause(parsed)
-      new_parsed = []
-      data = remove_matching_rounded_brackets(parsed.clone)
-      # data.each do |d|
-      #     d[:delete] = true if d[:type].eql?('term') && (d[:value].eql?(' ') || d[:value].eql?(''))
-      # end
+    def find_index_in_query_from(index_location)
+      @parsed.select{|s| s[:type].eql?('index')}.reverse.each do |index|
+        current_index_location = @parsed.rindex(index)
+        break index if current_index_location < index_location
+      end
+    end
 
+    def find_closing_round_bracket(candidate_i_start)
+      candidate_index_end = -1
+      bracket_counter = 0
+      @parsed[candidate_i_start..@parsed.length].each_with_index do |part, index|
+        bracket_counter += 1 if part[:type].eql?('open_round_bracket')
+        bracket_counter -= 1 if part[:type].eql?('close_round_bracket')
+
+        if part[:type].eql?('close_round_bracket') && bracket_counter == 0
+          candidate_index_end = candidate_i_start + index
+          break
+        end
+      end
+      candidate_index_end
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      -1
+    end
+
+    def determine_phrases
+      while (quotes = @parsed.select { |s| s[:type].eql?('quote') }).length > 0
+        phrase = []
+        quote_index = @parsed.rindex(quotes[0])
+
+        @parsed[quote_index..@parsed.length].each_with_index do |t, i|
+          if t[:type].eql?('quote') && i > 0
+            t[:delete] = true
+            break
+          else
+            if i > 0
+              phrase_term = t.clone
+              phrase_term[:type] = 'term'
+              phrase << phrase_term
+            end
+            t[:delete] = true
+          end
+
+        end
+
+        phrase = "\"#{phrase.map { |m| m[:value] }.join}\""
+
+        @parsed[quote_index] = { value: phrase, delete: false, type: 'term', offset: [0, 0] }
+        @parsed.delete_if { |d| d[:delete] }
+      end
+
+      terms = @parsed.select { |s| s[:type].eql?('term') }
+      terms.each do |t|
+        if t[:value].eql?('\\')
+          t[:delete] = true
+        end
+        t[:value] = t[:value].gsub(/\\"/, '"')
+        t[:value] = t[:value].gsub(/\\:/, ':')
+        t[:value] = t[:value].gsub(/\\\]/, ']')
+        t[:value] = t[:value].gsub(/\\\[/, '[')
+      end
+
+      @parsed.delete_if { |d| d[:delete] }
+      @parsed = reset_offset(@parsed)
+
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    def normalize_dates
+      new_date_range = []
+      date_ranges = @parsed.select { |s| s[:type].eql?('index') && s[:value] =~ /(start|end)?date/ }
+      if date_ranges.length > 0
+        date_ranges.each do |date_range|
+          index = @parsed.rindex(date_range)
+          parsed[index][:value] = 'date_range'
+        end
+      end
+
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    def normalize_operators
+      operators = @parsed.select { |s| s[:type].eql?('operator') }
+      not_operators = operators.select { |s| s[:value].eql?('NOT') }
+
+      if not_operators
+        not_operators.each do |not_operator|
+          index = @parsed.rindex(not_operator)
+          if @parsed[index - 1][:value].eql?(' ') && @parsed[index - 2][:type].eql?('operator')
+            @parsed[index - 1][:delete] = true
+            @parsed[index - 2][:delete] = true
+          elsif @parsed[index - 1][:type].eql?('operator')
+            @parsed[index - 1][:delete] = true
+          end
+
+          @parsed.delete_if { |d| d[:delete] }
+          @parsed = reset_offset(@parsed)
+        end
+      end
+
+      unless @parsed[0][:type].eql?('operator')
+        @parsed.unshift({ :value => "AND", :delete => false, :type => "operator", :offset => [0, 0] })
+        @parsed = reset_offset(@parsed)
+      end
+
+      self
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    private
+
+    def filter?(index)
+      index =~ /^facet_/
+    end
+
+    def process_date(elastic_index, term)
+      query_terms = term
+      if query_terms =~ /^\(?\[? *(-?\d{3,4}|NaN) +TO +(-?\d{3,4}|NaN) *\]?\)?$/
+        from_date = $1
+        to_date = $2
+
+        from_date = '1970' unless from_date =~ /^\d+$/ && from_date.length <= 4
+        to_date = '9999' unless to_date =~ /^\d+$/ && to_date.length <= 4
+
+        from_date = "#{from_date}-01-01"
+        to_date = "#{to_date}-12-31"
+
+        fragment = { 'range' => { elastic_index => { 'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation } } }
+      elsif query_terms =~ /^\(?\[?(-?\d{8}) TO (-?\d{8})\]?\)?$/
+        from_date = $1
+        to_date = $2
+
+        fragment = { 'range' => { elastic_index => { 'gte' => from_date, 'lte' => to_date, 'relation' => @date_range_relation } } }
+      end
+
+      fragment
+    end
+
+    def query_bit_list()
+      bit_list = []
+
+      @parsed.each do |p|
+        case p[:type]
+        when 'index'
+          bit_list << 'i'
+        when 'operator'
+          bit_list << 'o'
+        else
+          bit_list << 't'
+        end
+      end
+      bit_list
+    end
+
+    def facet?(index)
+      @indexes.facet_map.key?(index) # || @indexes.include?(index) && @indexes.list[index] =~ /\.keyword$/
+    end
+
+    def elastic_operator(operator)
+      case operator
+      when 'OR'
+        'should'
+      when 'NOT'
+        'must_not'
+      else
+        #'AND'
+        'must'
+      end
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      self
+    end
+
+    def reset_offset(data)
       offset_start = 0
       offset_end = 0
-      data.each_with_index do |d, i|
+      data.each_with_index do |d, _|
         offset_end += d[:value].length
         d[:offset] = [offset_start, offset_end]
         offset_start = offset_end
       end
 
-      indexmap = make_indexmap(data)
-
-      indexmap.each do |s|
-        index = s[0]
-        all_operators = data.select { |m| m[:type].eql?('operator') }.map { |m| m[:offset] = []; m }
-        if all_operators.map { |m| m[:value] }.uniq.compact.size == 1 && !all_operators.map { |m| m[:value] }.uniq.compact.include?('NOT')
-          default_operator = all_operators.first
-        else
-          default_operator = { type: 'operator', value: 'AND', delete: false, offset: [] }
-        end
-        clause = data[s[1]..s[2]].clone
-
-        operatormap = make_operatormap(clause)
-
-        sub_queries = []
-        operator = default_operator
-        if operatormap.map { |m| m[0][:value] }.uniq.compact.size == 1
-          operator = operatormap.first.first
-        end
-        if operatormap && operatormap.length > 0 && operatormap.first.first[:value].eql?('NOT')
-          operatormap.each do |op|
-            op.first[:value] = 'NOT'
-          end
-        end
-
-        operatormap.each_with_index do |om, i|
-          op = operatormap.last[0]
-          # if op[:value].eql?('NOT') && i == 0 && i < operatormap.size-1
-          #   op = default_operator
-          #   operator = op
-          # end
-          terms = clause[om[1]..om[2]]
-          next if terms.empty? || terms.map { |m| m[:value] }.join('').strip.empty?
-
-          sub_queries << { index: index[0], operator: om.first, terms: terms }
-        end
-        unless sub_queries.empty?
-          clause = sub_queries
-        else
-          next if clause.empty? || clause.map { |m| m[:value] }.join('').strip.empty?
-          clause = [{ index: index[0], operator: operator, terms: clause }]
-        end
-
-        # if operatormap.empty?
-        #   operator = default_operator
-        # else
-        #   operator = operatormap.first.first
-        # end
-
-        new_parsed << { index: index[0], operator: operator, clause: clause }
-      end
-
-      parsed = []
-      new_parsed.each do |n|
-        clause = []
-
-        n[:clause].each do |c|
-          terms = build_terms(c[:terms])
-          clause << { index: c[:index][:value], operator: c[:operator][:value], terms: terms }
-        end
-        parsed << { index: n[:index][:value], operator: n[:operator][:value], clause: clause }
-      end
-
-      parsed
+      data
+    rescue StandardError => e
+      log_error(e.message, __method__.to_s, __LINE__)
+      data
     end
 
-    def build_terms(data)
-      query = ''
-      data.each do |value|
-        case value[:type]
-        when 'term'
-          query += value[:value]
-        when 'phrase'
-          phrase = "\"#{value[:value].map { |n| n[:value] }.join("")}\""
-          query += phrase
-        else
-          next if ['index', 'operator'].include?(value[:type])
-          query += value[:value]
-        end
-      end
-      #      query.strip.gsub(/^\(*/, '').gsub(/\)*$/, '')
-      query.strip
+    def log_error(message, method_name, line)
+      puts "<!#{line} #{method_name}"
+      puts message
+      pp @parsed
+      puts "=========================>"
     end
-
-    def make_operatormap(data)
-      operators = data.select { |s| s[:type].eql?('operator') }
-      operator_map = []
-      operators.each_with_index do |operator, index|
-        operator_index = data.index(operator)
-        if index == 0 && operator_index > 0
-          operator_map << [operator, 0, operator_index - 1]
-        end
-
-        if index + 1 < operators.length
-          next_operator = operators[index + 1]
-          next_operator_index = data.index(next_operator)
-          operator_map << [operator, operator_index + 1, next_operator_index - 1]
-        else
-          operator_map << [operator, operator_index + 1, data.size - 1]
-        end
-      end
-      operator_map
-    end
-
-    def make_indexmap(data)
-      indexes = data.select { |s| s[:type].eql?('index') }
-      indexes_map = indexes.map { |m| [m, data.index(m)] }
-
-      m = []
-      indexes_map.each_with_index do |_, i|
-        start_index = indexes_map[i][1] + 1
-        until data[start_index][:type].eql?('operator') || start_index < 1
-          start_index -= 1
-        end
-        start_index = indexes_map[i][1] + 1 if start_index < 1
-
-        if i == indexes_map.size - 1
-          end_index = data.size - 1
-        else
-          end_index = indexes_map[i + 1][1] - 1
-        end
-        until data[end_index][:type].eql?('operator') || end_index < 1 || end_index < start_index
-          end_index -= 1
-        end
-
-        end_index -= 1 if data[end_index][:type].eql?('operator')
-
-        if end_index < 1 || end_index <= start_index
-          if i == indexes_map.size - 1
-            end_index = data.size - 1
-          else
-            end_index = indexes_map[i + 1][1] - 1
-          end
-        end
-        if indexes_map.size - 1 == i && end_index != data.size - 1
-          end_index = data.size - 1
-        end
-        m << [_, start_index, end_index]
-      end
-      m
-    end
-
   end
 end

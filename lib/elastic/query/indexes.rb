@@ -8,7 +8,7 @@ module Query
       if mappings.has_key?(:query_mapping)
         @query_mapping = JSON.load(File.read(mappings[:query_mapping]))
       end
-      @indexlist = (@facet_map.keys + @index_map.keys + @query_mapping.keys).select { |s| s !~ /local/ } || {}
+      @indexlist = (@facet_map.keys + @index_map.keys + @query_mapping.keys) #.select { |s| s !~ /local/ } || {}
     end
 
     def facet_map
@@ -33,9 +33,9 @@ module Query
 
     def include?(key)
       case key
-      when /lsr\d+/
+      when /lsr_?\d+/
         return true
-      when /facet_local\d+/
+      when /facet_local_?\d+/
         return true
       else
         return @indexlist.include?(key) ? true : false
