@@ -586,6 +586,12 @@ module Query
         @parsed = reset_offset(@parsed)
       end
 
+      if @parsed.last[:type].eql?('operator')
+        @parsed.last[:delete] = true
+        @parsed.delete_if { |d| d[:delete] }
+        @parsed = reset_offset(@parsed)
+      end
+
       self
     rescue StandardError => e
       log_error(e.message, __method__.to_s, __LINE__)
