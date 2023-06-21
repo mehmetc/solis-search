@@ -175,7 +175,7 @@ module Query
         strategy_type = 'query_mapping_2'
         q = @indexes.query_mapping[index]["{{}}"]
 
-        fragment = JSON.parse(q.to_json.gsub('{{}}', query))
+        fragment = JSON.parse(q.to_json.gsub('{{}}', query_terms.flatten.first))
         # when index if a FACET we add a term index
       elsif facet?(index)
         strategy_type = 'facet'
