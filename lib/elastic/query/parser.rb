@@ -301,7 +301,7 @@ module Query
           next_term = @parsed[next_term_index]
           #
           next if !prev_term[:type].eql?('term')
-          if ['*', '?', '-', ',', '!', '@', '#', '$', ';', ':', '/', '%', '^', '&', '"', '|', '+', '\'', "~", '`', '<', '>', '(', ')'].include?(term[:value])
+          if ['?', '-', ',', '!', '@', '#', '$', ';', ':', '/', '%', '^', '&', '"', '|', '+', '\'', "~", '`', '<', '>', '(', ')'].include?(term[:value])
             # if !['(',')'].include?(term[:value])
             prev_term[:value] += term[:value]
             term[:delete] = true
