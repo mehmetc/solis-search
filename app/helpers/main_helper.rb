@@ -31,7 +31,7 @@ module Sinatra
 
     def normalize_output(data, query)
       out = DataCollector::Output.new
-      rules_ng.run(RULES['archiefpunt'], data, out, query)
+      rules_ng.run(RULES['solis'], data, out, query)
 
       out
     end
