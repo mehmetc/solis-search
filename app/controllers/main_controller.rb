@@ -34,7 +34,8 @@ class MainController < Sinatra::Base
     response = HTTP.post("#{elastic_config[:host]}/#{elastic_config[:index]}/_search", json: elastic_query)
 
     if response.status == 200
-      result = normalize_output(::JSON.parse(response.body.to_s), elastic_query)
+      in_params = {query: elastic_query, highlight: params['highlight'] || '0'}
+      result = normalize_output(::JSON.parse(response.body.to_s), in_params)
     else
       logger.error(response.body.to_s)
       halt 500, ERB::Util.html_escape('Error doing search')

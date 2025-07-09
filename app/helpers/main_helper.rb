@@ -29,9 +29,9 @@ module Sinatra
       indexes_list
     end
 
-    def normalize_output(data, query)
+    def normalize_output(data, params)
       out = DataCollector::Output.new
-      rules_ng.run(RULES['solis'], data, out, query)
+      rules_ng.run(RULES['solis'], data, out, params)
 
       out
     end
