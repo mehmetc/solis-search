@@ -1,6 +1,7 @@
 require 'sinatra/base'
 require 'http'
 require 'json'
+require 'http/accept'
 require 'lib/config_file'
 require 'app/helpers/main_helper'
 require 'lib/elastic/query'
@@ -17,6 +18,17 @@ class MainController < Sinatra::Base
     set :logging, true
     set :static, true
     set :public_folder, "#{root}/public"
+  end
+
+  before do
+    accept_header = request.env['HTTP_ACCEPT']
+    accept_header = params['accept'] if params.include?('accept')
+    accept_header = 'text/html' if accept_header.nil?
+
+    media_types = HTTP::Accept::MediaTypes.parse(accept_header).map { |m| m.mime_type.eql?('*/*') ? 'application/json' : m.mime_type } || ['application/json']
+    @media_type = media_types.first
+
+    content_type @media_type
   end
 
   get '/' do
@@ -47,7 +59,12 @@ class MainController < Sinatra::Base
   get '/help' do
     words = ['water', 'wijn', 'boek', 'koning', 'antw', 'dirk', 'gebouw', 'open']
 
-    erb :'help.html', locals: {base_path: ConfigFile[:services][$SERVICE_ROLE][:base_path], indexes: available_indexes, words: words}
+    if @media_type.eql?('application/json')
+      available_indexes.to_json
+    else
+      erb :'help.html', locals: {base_path: ConfigFile[:services][$SERVICE_ROLE][:base_path], indexes: available_indexes, words: words}
+    end
+
   end
 
   post '/' do
