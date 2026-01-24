@@ -182,18 +182,24 @@ module Query
         elastic_index = @indexes.facet_map[index]
         elastic_index = [elastic_index] unless elastic_index.is_a?(Array)
         fragment = []
-        elastic_index.each do |ri|
-          query_terms.each do |term|
-            if ri =~ /date|duration/
-              fragment << process_date(ri, term)
-            else
 
+        query_terms.each do |term|
+          term_fragments = []
+          elastic_index.each do |ri|
+            if ri =~ /date|duration/
+              term_fragments << process_date(ri, term)
+            else
               qs = JSON.load(File.read(@mappings[:term_query]))
               qs['term'][ri] = qs['term'].delete 'index'
               qs['term'][ri]['value'] = term.gsub(/^"/, '').gsub(/"$/, '').gsub('_PC_TN', '') #&.gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~:\/])/, '\\\\\1') || ''
-
-              fragment << qs
+              term_fragments << qs
             end
+          end
+
+          if term_fragments.length > 1
+            fragment << { 'bool' => { 'should' => term_fragments } }
+          else
+            fragment += term_fragments
           end
         end
         operator = sub_operator unless operator.eql?('NOT')

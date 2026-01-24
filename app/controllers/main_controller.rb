@@ -46,7 +46,8 @@ class MainController < Sinatra::Base
     response = HTTP.post("#{elastic_config[:host]}/#{elastic_config[:index]}/_search", json: elastic_query)
 
     if response.status == 200
-      in_params = {query: elastic_query, highlight: params['highlight'] || '0'}
+      language = params['language'] || ConfigFile[:services][$SERVICE_ROLE][:language] || 'nl'
+      in_params = {query: elastic_query, highlight: params['highlight'] || '0', language: language}
       result = normalize_output(::JSON.parse(response.body.to_s), in_params)
     else
       logger.error(response.body.to_s)
