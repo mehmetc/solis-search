@@ -230,6 +230,11 @@ module Query
         strategy_type = 'default'
         # in all other cases we use a query_string
         elastic_index = @indexes.index_map[index]
+        elastic_filter = nil
+        if elastic_index.is_a?(Hash)
+          elastic_filter = elastic_index['filter']
+          elastic_index = elastic_index['index']
+        end
         elastic_index = @indexes.index_map['any'] if elastic_index.nil?
 
         query_operator = operator.eql?('NOT') ? 'AND' : operator
@@ -239,7 +244,8 @@ module Query
         query_string['query_string']['fields'] = elastic_index
         query_string['query_string']['query'] = query_terms.join(' ')&.gsub(/([\+\-\=\&\|\>\<\!\(\)\{\}\[\]^\~:\/])/, '\\\\\1')&.gsub(/(\?)$/, '\\\\\1') || ''
 
-        fragment = query_string
+        fragment = [query_string, elastic_filter]
+        fragment = fragment.flatten.compact
       end
 
       qf = {}

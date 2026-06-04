@@ -58,14 +58,9 @@ class MainController < Sinatra::Base
   end
 
   get '/help' do
-    words = ['water', 'wijn', 'boek', 'koning', 'antw', 'dirk', 'gebouw', 'open']
+    content_type :json
 
-    if @media_type.eql?('application/json')
-      available_indexes.to_json
-    else
-      erb :'help.html', locals: {base_path: ConfigFile[:services][$SERVICE_ROLE][:base_path], indexes: available_indexes, words: words}
-    end
-
+    available_indexes.to_json
   end
 
   post '/' do
